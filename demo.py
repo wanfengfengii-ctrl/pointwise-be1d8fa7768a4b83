@@ -7,14 +7,24 @@ from audit.purge import purge
 from audit.reconcile import reconcile_posting
 from audit.workspace import initialize_workspace, open_workspace
 from close.finalize import seal
-from dispatch.submit import ReplyLost, advance
+from dispatch.confirm import confirmation_frontier
+from dispatch.submit import ReplyLost, advance, advance_pair
 from intake.batches import apply
+from pair_example import HEADS as PAIR_HEADS
+from pair_example import DAYS as PAIR_DAYS
+from pair_example import prepare as prepare_pair_fixture
 from receiver.balances import balance
 from receiver.receipts import receipt_for_request
 
 
 def lose_reply(receipt):
     raise ReplyLost(f'reply for {receipt.request_id} lost after receiver commit')
+
+
+def lose_pair_reply(pair_receipt):
+    raise ReplyLost(
+        f'pair reply for {pair_receipt.pair_id} lost after receiver commit'
+    )
 
 
 def demonstrate(root, sample):
@@ -102,11 +112,118 @@ def demonstrate(root, sample):
     print(json.dumps(secondary_actual, ensure_ascii=False, sort_keys=True))
 
 
+def demonstrate_paired_correction(root):
+    """Two days booked together as -3/+3, with a lost reply and reopen reclaim."""
+    pair_id = 'march-transfer'
+    initialize_workspace(root)
+    with open_workspace(root) as work:
+        prepare_pair_fixture(work)
+        before = tuple(balance(work.external, day).total for day in PAIR_DAYS)
+        lost = advance_pair(
+            work.local, work.external, pair_id, PAIR_HEADS, after_post=lose_pair_reply,
+        )
+        while_open = {
+            'state': lost.state,
+            'external_totals': tuple(balance(work.external, day).total for day in PAIR_DAYS),
+            'lookup_states': [lookup(work.local, seal_id).state for seal_id in PAIR_HEADS],
+        }
+        original_receipts = tuple(
+            receipt_for_request(work.external, f'pair:{pair_id}:{seal_id}')
+            for seal_id in PAIR_HEADS
+        )
+    with open_workspace(root) as work:
+        # Reopen and resubmit the same group in reverse order.
+        recovered = advance_pair(
+            work.local, work.external, pair_id, PAIR_HEADS[::-1],
+        )
+        replayed = advance_pair(work.local, work.external, pair_id, PAIR_HEADS)
+        reconciliations = []
+        for seal_id in PAIR_HEADS:
+            review = lookup(work.local, seal_id)
+            check = reconcile_posting(work.external, review)
+            reconciliations.append({
+                'seal_id': seal_id,
+                'state': review.state,
+                'delta': review.delta,
+                'request_id': review.receipt.request_id,
+                'posting_matches': check.posting_matches,
+                'balance_matches': check.balance_matches,
+            })
+        after = {
+            'state': recovered.state,
+            'deltas': [receipt.delta for receipt in recovered.receipts],
+            'external_totals': tuple(balance(work.external, day).total for day in PAIR_DAYS),
+            'frontiers': tuple(
+                confirmation_frontier(work.local, day) for day in PAIR_DAYS
+            ),
+            'posting_counts': [
+                len(balance(work.external, day).postings) for day in PAIR_DAYS
+            ],
+            'same_original_receipts': recovered.receipts == original_receipts,
+            'replay_unchanged': replayed.receipts == recovered.receipts,
+            'reconciliations': reconciliations,
+        }
+        # Later revisions on both days keep using the ordinary single entry.
+        apply(work.local, PAIR_DAYS[0], 'post-pair-1', 'correction',
+              [('estuary', 'intake', 20)])
+        seal(work.local, PAIR_DAYS[0], 'later-1')
+        apply(work.local, PAIR_DAYS[1], 'post-pair-2', 'correction',
+              [('estuary', 'intake', 30)])
+        seal(work.local, PAIR_DAYS[1], 'later-2')
+        later = (
+            advance(work.local, work.external, PAIR_DAYS[0]).receipt.delta,
+            advance(work.local, work.external, PAIR_DAYS[1]).receipt.delta,
+        )
+        final_totals = tuple(balance(work.external, day).total for day in PAIR_DAYS)
+
+    expected_open = {
+        'state': 'pending',
+        'external_totals': (2, 15),
+        'lookup_states': ['pending', 'pending'],
+    }
+    expected_after = {
+        'state': 'confirmed',
+        'deltas': [-3, 3],
+        'external_totals': (2, 15),
+        'frontiers': (2, 2),
+        'posting_counts': [2, 2],
+        'same_original_receipts': True,
+        'replay_unchanged': True,
+    }
+    actual_open = while_open
+    actual_after = {key: after[key] for key in expected_after}
+    if before != (5, 12) or actual_open != expected_open or actual_after != expected_after:
+        raise AssertionError(
+            f'PAIR_DEMO_MISMATCH before={before!r} open={actual_open!r} '
+            f'after={actual_after!r}'
+        )
+    if any(not item['posting_matches'] or not item['balance_matches']
+           for item in reconciliations):
+        raise AssertionError(f'pair reconciliation failed: {reconciliations!r}')
+    if later != (18, 15) or final_totals != (20, 30):
+        raise AssertionError(
+            f'post-pair ordinary reporting failed: later={later!r} totals={final_totals!r}'
+        )
+    evidence = {
+        'case_id': 'paired.two_day_correction',
+        'base_totals': list(before),
+        'after_lost_reply': actual_open,
+        'after_reopen_reclaim': after,
+        'reconciled_by_original_seal': reconciliations,
+        'later_single_deltas': list(later),
+        'final_totals': list(final_totals),
+        'oracle': '5->2 is -3 and 12->15 is +3; the pair books both legs once.',
+    }
+    print('POINTWISE_PAIR ' + json.dumps(evidence, ensure_ascii=False, sort_keys=True))
+
+
 def main():
     sample_path = Path(__file__).resolve().parent / 'samples' / 'shift.json'
     sample = json.loads(sample_path.read_text(encoding='utf-8'))
     with TemporaryDirectory(prefix='estuary-demo-') as root:
         demonstrate(root, sample)
+    with TemporaryDirectory(prefix='estuary-pair-demo-') as root:
+        demonstrate_paired_correction(root)
 
 
 if __name__ == '__main__':

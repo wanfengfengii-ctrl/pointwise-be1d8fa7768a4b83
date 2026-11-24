@@ -37,7 +37,9 @@ def confirmation_for_revision(connection, seal_id):
         FROM confirmations WHERE seal_id = ?
     ''', (seal_id,)).fetchone()
     if row is None:
-        return None
+        # Paired reports confirm both days outside the ordinary per-seal table.
+        from dispatch.pairs import confirmed_receipt_for_seal
+        return confirmed_receipt_for_seal(connection, seal_id)
     receipt_id, request_id, day, delta, sequence = row
     return Receipt(receipt_id, request_id, day, decode_litres(delta), sequence)
 

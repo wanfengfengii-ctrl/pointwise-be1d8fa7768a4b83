@@ -38,6 +38,14 @@ def decode_litres(value):
     return int(value, 16)
 
 
+PAIR_REQUEST_PREFIX = 'pair:'
+
+
+def pair_request_id(pair_id, seal_id):
+    """Build the receiver-side request id used by one leg of a paired report."""
+    return f'{PAIR_REQUEST_PREFIX}{pair_id}:{seal_id}'
+
+
 @contextmanager
 def transaction(connection, *, write=False):
     connection.execute('BEGIN IMMEDIATE' if write else 'BEGIN')

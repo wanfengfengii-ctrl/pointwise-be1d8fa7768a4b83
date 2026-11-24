@@ -6,11 +6,14 @@ from audit.purge import init_purge_schema
 from close.revisions import init_revision_schema
 from dispatch.confirm import init_confirm_schema
 from dispatch.outbound import init_outbound_schema
+from dispatch.pairs import init_pair_report_schema
 from intake.batches import init_batch_schema
 from intake.observations import init_observation_schema
 from intake.source_detail import init_source_schema
 from meter_core import InputError, transaction
+from receiver.claims import init_claim_schema
 from receiver.ledger import init_ledger_schema
+from receiver.pairs import init_pair_schema
 from receiver.receipts import init_receipt_schema
 
 
@@ -67,12 +70,15 @@ def initialize_workspace(root):
         with transaction(workspace.local, write=True):
             for initialize in (
                 init_batch_schema, init_observation_schema, init_source_schema,
-                init_revision_schema, init_outbound_schema, init_confirm_schema, init_purge_schema,
+                init_revision_schema, init_outbound_schema, init_confirm_schema,
+                init_pair_report_schema, init_purge_schema,
             ):
                 initialize(workspace.local)
         with transaction(workspace.external, write=True):
             init_ledger_schema(workspace.external)
             init_receipt_schema(workspace.external)
+            init_claim_schema(workspace.external)
+            init_pair_schema(workspace.external)
 
 
 def open_workspace(root):
